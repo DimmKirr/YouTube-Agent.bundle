@@ -16,19 +16,48 @@ import unicodedata          # For XML string sanitization
 def natural_sort_key     (s):  return [int(text) if text.isdigit() else text for text in re.split(re.compile('([0-9]+)'), str(s).lower())]  ### Avoid 1, 10, 2, 20... #Usage: list.sort(key=natural_sort_key), sorted(list, key=natural_sort_key)
 def sanitize_path        (p):
   """Ensure path is unicode and strip control characters. In Python 2, decode bytes to unicode with UTF-8."""
-  # First convert to unicode
+  # First convert to unicode with encoding detection
   if isinstance(p, unicode):
     result = p
   elif isinstance(p, str):
+    # Try UTF-8 first (most common on Linux/Mac)
     try:
-      result = p.decode('utf-8')  # Try UTF-8 first
+      result = p.decode('utf-8')
     except UnicodeDecodeError:
+      # UTF-8 failed - might be Latin-1 or other encoding
+      # Try to detect mojibake: UTF-8 bytes incorrectly decoded as Latin-1
       try:
-        result = p.decode(sys.getfilesystemencoding())  # Fall back to system encoding
+        # Decode as Latin-1 (never fails), then check if it looks like UTF-8
+        latin1_decoded = p.decode('latin-1')
+
+        # If it has many characters in Latin-1 Supplement range (0x80-0xFF),
+        # it might be mojibake. Try re-encoding as Latin-1 and decoding as UTF-8
+        if sum(1 for c in latin1_decoded if 0x80 <= ord(c) <= 0xFF) > len(latin1_decoded) * 0.3:
+          try:
+            # Re-encode as Latin-1 and decode as UTF-8
+            result = latin1_decoded.encode('latin-1').decode('utf-8')
+            Log.Info(u'[sanitize_path] Recovered from Latin-1 mojibake: "{}"'.format(result[:80]))
+          except:
+            result = latin1_decoded  # Keep Latin-1 if recovery fails
+        else:
+          result = latin1_decoded  # Looks like valid Latin-1
       except:
-        result = p.decode('utf-8', errors='replace')  # Last resort
+        # Last resort: use system filesystem encoding
+        try:
+          result = p.decode(sys.getfilesystemencoding())
+        except:
+          # Final fallback: UTF-8 with replacement chars
+          result = p.decode('utf-8', errors='replace')
+          Log.Info(u'[sanitize_path] Used replacement chars for invalid UTF-8')
   else:
     result = unicode(p) if p is not None else u''
+
+  # Normalize Unicode to NFC (composed form)
+  # This ensures é (single char) instead of e + combining acute
+  try:
+    result = unicodedata.normalize('NFC', result)
+  except:
+    pass  # If normalization fails, keep original
 
   # Strip control characters (0x00-0x1F and 0x7F-0x9F) including newlines, NULL bytes
   # This prevents XML serialization errors in Plex
