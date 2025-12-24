@@ -5,14 +5,28 @@ import sys                  # getdefaultencoding, getfilesystemencoding, platfor
 import os                   # path.abspath, join, dirname
 import re                   #
 import inspect              # getfile, currentframe
-import urllib2              #
+import urllib2              # Python 2.7
+import urllib               # Python 2.7 - for urllib.quote/unquote
 from   lxml    import etree #
 from   io      import open  # open
 import hashlib
 
 ###Mini Functions ###
 def natural_sort_key     (s):  return [int(text) if text.isdigit() else text for text in re.split(re.compile('([0-9]+)'), str(s).lower())]  ### Avoid 1, 10, 2, 20... #Usage: list.sort(key=natural_sort_key), sorted(list, key=natural_sort_key)
-def sanitize_path        (p):  return p if isinstance(p, unicode) else p.decode(sys.getfilesystemencoding()) ### Make sure the path is unicode, if it is not, decode using OS filesystem's encoding ###
+def sanitize_path        (p):
+  """Ensure path is unicode. In Python 2, decode bytes to unicode with UTF-8."""
+  if isinstance(p, unicode):
+    return p
+  # If it's a byte string, decode it
+  if isinstance(p, str):
+    try:
+      return p.decode('utf-8')  # Try UTF-8 first
+    except UnicodeDecodeError:
+      try:
+        return p.decode(sys.getfilesystemencoding())  # Fall back to system encoding
+      except:
+        return p.decode('utf-8', errors='replace')  # Last resort
+  return unicode(p) if p is not None else u''
 def js_int               (i):  return int(''.join([x for x in list(i or '0') if x.isdigit()]))  # js-like parseInt - https://gist.github.com/douglasmiranda/2174255
 
 ### Return dict value if all fields exists "" otherwise (to allow .isdigit()), avoid key errors
@@ -30,7 +44,7 @@ def uppercase_regex(a):
     return a.group(1) + a.group(2).upper()
 
 def titlecase(input_string):
-    return re.sub("(^|\s)(\S)", uppercase_regex, input_string)
+    return re.sub(r"(^|\s)(\S)", uppercase_regex, input_string)
 
 ### These calls use DeArrow Created By Ajay Ramachandran to Obtain a Crowd Sourced Video Title
 def DeArrow(video_id):
@@ -64,7 +78,7 @@ def DeArrow(video_id):
 
 ### Convert ISO8601 Duration format into seconds ###
 def ISO8601DurationToSeconds(duration):
-  try:     match = re.match('PT(\d+H)?(\d+M)?(\d+S)?', duration).groups()
+  try:     match = re.match(r'PT(\d+H)?(\d+M)?(\d+S)?', duration).groups()
   except:  return 0
   else:    return 3600 * js_int(match[0]) + 60 * js_int(match[1]) + js_int(match[2])
 
@@ -90,7 +104,8 @@ def GetLibraryRootPath(dir):
     filename = os.path.join(CachePath, '_Logs', '_root_.scanner.log')
     if os.path.isfile(filename):
       Log.Info(u'[!] ASS root scanner file present: "{}"'.format(filename))
-      line = Core.storage.load(filename)  #with open(filename, 'rb') as file:  line=file.read()
+      with open(filename, 'r', encoding='utf-8') as file:
+        line = file.read()
       for root in [os.sep.join(dir.split(os.sep)[0:x+2]) for x in range(dir.count(os.sep)-1, -1, -1)]:
         if "root: '{}'".format(root) in line:  path = os.path.relpath(dir, root).rstrip('.');  break  #Log.Info(u'[!] root not found: "{}"'.format(root))
       else: path, root = '_unknown_folder', ''
@@ -162,7 +177,7 @@ def Search(results, media, lang, manual, movie):
   except Exception as e:  Log('search() - Exception1: filename: "{}", e: "{}"'.format(filename, e))
   try:                    filename = os.path.basename(filename)
   except Exception as e:  Log('search() - Exception2: filename: "{}", e: "{}"'.format(filename, e))
-  try:                    filename = urllib2.unquote(filename)
+  try:                    filename = urllib.unquote(filename)
   except Exception as e:  Log('search() - Exception3: filename: "{}", e: "{}"'.format(filename, e))
   Log(u''.ljust(157, '='))
   Log(u"Search() - dir: {}, filename: {}, displayname: {}".format(dir, filename, displayname))
@@ -180,7 +195,7 @@ def Search(results, media, lang, manual, movie):
   except Exception as e:  Log('search() - filename: "{}" Regex failed to find YouTube id, error: "{}"'.format(filename, e))
   
   if movie:  Log.Info(filename)
-  else:    
+  else:
     s = media.seasons.keys()[0] if media.seasons.keys()[0]!='0' else media.seasons.keys()[1] if len(media.seasons.keys()) >1 else None
     if s:
       result = YOUTUBE_PLAYLIST_REGEX.search(os.path.basename(os.path.dirname(dir)))
@@ -196,7 +211,9 @@ def Search(results, media, lang, manual, movie):
   json_filename = os.path.join(dir, os.path.splitext(filename)[0]+ ".info.json")
   Log(u'Searching for info file: {}'.format(json_filename))
   if os.path.exists(json_filename):
-    try:     json_video_details = JSON.ObjectFromString(Core.storage.load(json_filename))  #with open(json_filename) as f:  json_video_details = JSON.ObjectFromString(f.read())
+    try:
+      with open(json_filename, 'r', encoding='utf-8') as f:
+        json_video_details = JSON.ObjectFromString(f.read())
     except Exception as e:
       Log('search() - Unable to load info.json, e: "{}"'.format(e))
     else:
@@ -251,13 +268,15 @@ def Update(metadata, media, lang, force, movie):
     except Exception as e:  Log('update() - Exception1: filename: "{}", e: "{}"'.format(filename, e))
     try:                    filename = os.path.basename(filename)
     except Exception as e:  Log('update() - Exception2: filename: "{}", e: "{}"'.format(filename, e))
-    try:                    filename = urllib2.unquote(filename)
+    try:                    filename = urllib.unquote(filename)
     except Exception as e:  Log('update() - Exception3: filename: "{}", e: "{}"'.format(filename, e))
 
     json_filename = os.path.join(dir, os.path.splitext(filename)[0]+ ".info.json")
     Log(u'Update: Searching for info file: {}, dir:{}'.format(json_filename, GetMediaDir(media, movie, True)))
     if os.path.exists(json_filename):
-      try:             json_video_details = JSON.ObjectFromString(Core.storage.load(json_filename))
+      try:
+        with open(json_filename, 'r', encoding='utf-8') as f:
+          json_video_details = JSON.ObjectFromString(f.read())
       except IOError:  guid = None
       else:    
         guid          = Dict(json_video_details, 'id')
@@ -354,10 +373,10 @@ def Update(metadata, media, lang, force, movie):
 
       ### Extract season and transparent folder to reduce complexity and use folder as serie name ###
       reverse_path, season_folder_first = list(reversed(path.split(os.sep))), False
-      SEASON_RX = [ '^Specials',                                                                                                                                           # Specials (season 0)
-                    '^(?P<show>.*)?[\._\-\— ]*?(Season|Series|Book|Saison|Livre|Temporada|[Ss])[\._\—\- ]*?(?P<season>\d{1,4}).*?',                                        # (title) S01
-                    '^(?P<show>.*)?[\._\-\— ]*?Volume[\._\-\— ]*?(?P<season>(?=[MDCLXVI])M*D?C{0,4}L?X{0,4}V?I{0,4}).*?',                                                  # (title) S01
-                    '^(Saga|(Story )?Ar[kc])']                                                                                                                             # Last entry, folder name droped but files kept: Saga / Story Ar[kc] / Ar[kc]
+      SEASON_RX = [ r'^Specials',                                                                                                                                           # Specials (season 0)
+                    r'^(?P<show>.*)?[\._\-\— ]*?(Season|Series|Book|Saison|Livre|Temporada|[Ss])[\._\—\- ]*?(?P<season>\d{1,4}).*?',                                        # (title) S01
+                    r'^(?P<show>.*)?[\._\-\— ]*?Volume[\._\-\— ]*?(?P<season>(?=[MDCLXVI])M*D?C{0,4}L?X{0,4}V?I{0,4}).*?',                                                  # (title) S01
+                    r'^(Saga|(Story )?Ar[kc])']                                                                                                                             # Last entry, folder name droped but files kept: Saga / Story Ar[kc] / Ar[kc]
       for folder in reverse_path[:-1]:                 # remove root folder from test, [:-1] Doesn't thow errors but gives an empty list if items don't exist, might not be what you want in other cases
         for rx in SEASON_RX[:-1]:                      # in anime, more specials folders than season folders, so doing it first
           if re.match(rx, folder, re.IGNORECASE):      # get season number but Skip last entry in seasons (skipped folders)
@@ -410,7 +429,7 @@ def Update(metadata, media, lang, force, movie):
       else:
         
         if not title:
-          title          = re.sub( "\s*\[.*?\]\s*"," ",series_folder)  #instead of path use series foldername
+          title          = re.sub(r"\s*\[.*?\]\s*"," ",series_folder)  #instead of path use series foldername
           metadata.title = title
         Log.Info('[ ] title:        "{}", metadata.title: "{}"'.format(title, metadata.title))
         if not Dict(json_playlist_details, 'snippet', 'description'):
@@ -432,7 +451,7 @@ def Update(metadata, media, lang, force, movie):
 
         ### Playlist with cast coming from multiple chan entries in youtube.id file ###############################################################################################################
         if os.path.exists(os.path.join(dir, 'youtube.id')):
-          with open(os.path.join(dir, 'youtube.id')) as f:
+          with open(os.path.join(dir, 'youtube.id'), encoding='utf-8') as f:
             metadata.roles.clear()
             for line in f.readlines():
               try:                    json_channel_details = json_load(YOUTUBE_CHANNEL_DETAILS, line.rstrip())['items'][0]
@@ -541,7 +560,9 @@ def Update(metadata, media, lang, force, movie):
             Log.Info(u'Directory {} contains {} files'.format(root, len(filenames)))  #for filename in filenames: Log.Info('File: {}'.format(filename))
             if json_filename in filenames :
               json_file = os.path.join(root, json_filename)
-              try:  json_video_details = JSON.ObjectFromString(Core.storage.load(json_file))  #"JSONDecodeError: Unexpected end of input" if empty
+              try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                  json_video_details = JSON.ObjectFromString(f.read())
               except: json_video_details = None
               if json_video_details:
                 Log.Info('Attempting to read metadata from {}'.format(os.path.join(root, json_filename)))
@@ -633,13 +654,13 @@ PLEX_LIBRARY_URL         = "http://127.0.0.1:32400/library/sections/"    # Allow
 YOUTUBE_API_BASE_URL     = "https://www.googleapis.com/youtube/v3/"
 YOUTUBE_CHANNEL_ITEMS    = YOUTUBE_API_BASE_URL + 'search?order=date&part=snippet&type=video&maxResults=50&channelId={}&key={}'
 YOUTUBE_CHANNEL_DETAILS  = YOUTUBE_API_BASE_URL + 'channels?part=snippet%2CcontentDetails%2Cstatistics%2CbrandingSettings&id={}&key={}'
-YOUTUBE_CHANNEL_REGEX    = Regex('\[(?:youtube(|2)\-)?(?P<id>UC[a-zA-Z0-9\-_]{22}|HC[a-zA-Z0-9\-_]{22})\]')
+YOUTUBE_CHANNEL_REGEX    = re.compile(r'\[(?:youtube(|2)\-)?(?P<id>UC[a-zA-Z0-9\-_]{22}|HC[a-zA-Z0-9\-_]{22})\]')
 YOUTUBE_PLAYLIST_ITEMS   = YOUTUBE_API_BASE_URL + 'playlistItems?part=snippet,contentDetails&maxResults=50&playlistId={}&key={}'
 YOUTUBE_PLAYLIST_DETAILS = YOUTUBE_API_BASE_URL + 'playlists?part=snippet,contentDetails&id={}&key={}'
-YOUTUBE_PLAYLIST_REGEX   = Regex('\[(?:youtube(|3)\-)?(?P<id>PL[^\[\]]{16}|PL[^\[\]]{32}|UU[^\[\]]{22}|FL[^\[\]]{22}|LP[^\[\]]{22}|RD[^\[\]]{22}|UC[^\[\]]{22}|HC[^\[\]]{22})\]',  Regex.IGNORECASE)  # https://regex101.com/r/37x8wI/2
+YOUTUBE_PLAYLIST_REGEX   = re.compile(r'\[(?:youtube(|3)\-)?(?P<id>PL[^\[\]]{16}|PL[^\[\]]{32}|UU[^\[\]]{22}|FL[^\[\]]{22}|LP[^\[\]]{22}|RD[^\[\]]{22}|UC[^\[\]]{22}|HC[^\[\]]{22})\]',  re.IGNORECASE)  # https://regex101.com/r/37x8wI/2
 YOUTUBE_VIDEO_SEARCH     = YOUTUBE_API_BASE_URL + 'search?&maxResults=1&part=snippet&q={}&key={}'
 YOUTUBE_json_video_details    = YOUTUBE_API_BASE_URL + 'videos?part=snippet,contentDetails,statistics&id={}&key={}'
-YOUTUBE_VIDEO_REGEX      = Regex('(?:^\d{8}_|\[(?:youtube\-)?)(?P<id>[a-z0-9\-_]{11})(?:\]|_)', Regex.IGNORECASE) # https://regex101.com/r/zlHKPD/1
+YOUTUBE_VIDEO_REGEX      = re.compile(r'(?:^\d{8}_|\[(?:youtube\-)?)(?P<id>[a-z0-9\-_]{11})(?:\]|_)', re.IGNORECASE) # https://regex101.com/r/zlHKPD/1
 YOUTUBE_CATEGORY_ID      = {  '1': 'Film & Animation',  '2': 'Autos & Vehicles',  '10': 'Music',          '15': 'Pets & Animals',        '17': 'Sports',                 '18': 'Short Movies',
                              '19': 'Travel & Events',  '20': 'Gaming',            '21': 'Videoblogging',  '22': 'People & Blogs',        '23': 'Comedy',                 '24': 'Entertainment',
                              '25': 'News & Politics',  '26': 'Howto & Style',     '27': 'Education',      '28': 'Science & Technology',  '29': 'Nonprofits & Activism',  '30': 'Movies',
