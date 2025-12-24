@@ -61,7 +61,8 @@ def sanitize_xml_string(s):
   # Filter out invalid XML characters
   # Valid XML chars: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
   valid_chars = []
-  for c in s:
+  # Convert to list to work around RestrictedPython sandbox blocking __iter__
+  for c in list(s):
     code = ord(c)
     # Allow: tab(9), newline(10), carriage return(13), and printable chars
     if code == 0x09 or code == 0x0A or code == 0x0D or \
@@ -226,12 +227,18 @@ def Search(results, media, lang, manual, movie):
   dir         = GetMediaDir(media, movie)
   Log.Info(u'[DEBUG] Raw filename from Plex: len={}, sample: "{}"'.format(
     len(filename) if filename else 0, filename[:100] if filename and len(filename) > 100 else filename))
-  try:                    filename = urllib.unquote(filename)  # URL decode first
-  except Exception as e:  Log('search() - Exception1: filename: "{}", e: "{}"'.format(filename, e))
-  try:                    filename = os.path.basename(filename)
-  except Exception as e:  Log('search() - Exception2: filename: "{}", e: "{}"'.format(filename, e))
-  try:                    filename = sanitize_path(filename)  # Then sanitize (strips control chars)
-  except Exception as e:  Log('search() - Exception3: filename: "{}", e: "{}"'.format(filename, e))
+  try:                    filename = urllib.unquote(filename) if filename else ''  # URL decode first
+  except Exception as e:  Log('search() - Exception1: filename: "{}", e: "{}"'.format(filename, e)); filename = filename or ''
+  try:                    filename = os.path.basename(filename) if filename else ''
+  except Exception as e:  Log('search() - Exception2: filename: "{}", e: "{}"'.format(filename, e)); filename = filename or ''
+  try:                    filename = sanitize_path(filename) if filename else ''  # Then sanitize (strips control chars)
+  except Exception as e:  Log('search() - Exception3: filename: "{}", e: "{}"'.format(filename, e)); filename = filename or ''
+
+  # Ensure we have valid values
+  if not filename or not dir:
+    Log.Info(u'search() - Missing required values: filename="{}", dir="{}"'.format(filename, dir))
+    return
+
   Log(u''.ljust(157, '='))
   Log(u"Search() - dir: {}, filename: {}, displayname: {}".format(dir, filename, displayname))
     
