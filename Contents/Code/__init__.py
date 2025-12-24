@@ -331,8 +331,11 @@ def Search(results, media, lang, manual, movie):
   except Exception as e:  Log(u'search() - Could not retrieve data from YouTube for: "{}", Exception: "{}"'.format(filename, e))
 
   library, root, path = GetLibraryRootPath(dir)
-  Log(u'Putting folder name "{}" as guid since no assign channel id or playlist id was assigned'.format(path.split(os.sep)[-1]))
-  safe_id = sanitize_xml_string('youtube|{}|{}'.format(path.split(os.sep)[-2] if os.sep in path else '', dir))
+  # Extract show folder name (3rd from end: Show/Season/file.mp4)
+  path_parts = path.split(os.sep)
+  show_folder = path_parts[-3] if len(path_parts) >= 3 else path_parts[-2] if len(path_parts) >= 2 else path_parts[-1] if path_parts else ''
+  Log(u'Putting folder name "{}" as guid since no assign channel id or playlist id was assigned'.format(show_folder))
+  safe_id = sanitize_xml_string('youtube|{}|{}'.format(show_folder, dir))
   results.Append( MetadataSearchResult( id=safe_id, name=os.path.basename(filename), year=None, score=80, lang=lang ) )
   Log(''.ljust(157, '='))
 
