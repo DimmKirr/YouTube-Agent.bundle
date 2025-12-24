@@ -620,9 +620,13 @@ def Update(metadata, media, lang, force, movie):
           #if not Dict(json_playlist_details, 'snippet', 'publishedAt'):  metadata.originally_available_at = Datetime.ParseDate(Dict(json_channel_items, 'snippet', 'publishedAt')).date();  Log.Info('[ ] publishedAt:  {}'.format(Dict(json_channel_items, 'snippet', 'publishedAt' )))
            
     #NOT PLAYLIST NOR CHANNEL GUID
-    else:  
+    else:
       Log.Info('No GUID so random folder')
-      metadata.title = series_folder  #instead of path use series foldername
+      # Extract show folder from dir path (dir is like "/path/Show Name/Season 2025/")
+      dir_parts = dir.rstrip(os.sep).split(os.sep)
+      show_name = dir_parts[-2] if len(dir_parts) >= 2 else series_folder
+      metadata.title = show_name
+      Log.Info(u'Extracted show title from path: "{}"'.format(show_name))
  
     ### Season + Episode loop ###
     genre_array = {}
