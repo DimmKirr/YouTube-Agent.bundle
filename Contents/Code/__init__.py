@@ -10,6 +10,7 @@ import urllib               # Python 2.7 - for urllib.quote/unquote
 from   lxml    import etree #
 from   io      import open  # open
 import hashlib
+import unicodedata          # For XML string sanitization
 
 ###Mini Functions ###
 def natural_sort_key     (s):  return [int(text) if text.isdigit() else text for text in re.split(re.compile('([0-9]+)'), str(s).lower())]  ### Avoid 1, 10, 2, 20... #Usage: list.sort(key=natural_sort_key), sorted(list, key=natural_sort_key)
@@ -40,6 +41,43 @@ def sanitize_path        (p):
       stripped_count, len(result), len(cleaned), cleaned[:80] if len(cleaned) > 80 else cleaned))
 
   return cleaned
+
+def sanitize_xml_string(s):
+  """Sanitize string for use in XML attributes. Removes invalid XML characters and normalizes Unicode."""
+  if s is None:
+    return ''
+
+  # Convert to string if not already
+  if not isinstance(s, (str, unicode)):
+    s = unicode(s)
+
+  # Ensure unicode
+  if isinstance(s, str):
+    try:
+      s = s.decode('utf-8')
+    except:
+      s = s.decode('utf-8', errors='replace')
+
+  # Filter out invalid XML characters
+  # Valid XML chars: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+  valid_chars = []
+  for c in s:
+    code = ord(c)
+    # Allow: tab(9), newline(10), carriage return(13), and printable chars
+    if code == 0x09 or code == 0x0A or code == 0x0D or \
+       (0x20 <= code <= 0xD7FF) or \
+       (0xE000 <= code <= 0xFFFD):
+      # Skip forbidden Unicode sequences
+      if code not in (0xFFFE, 0xFFFF, 0x2028, 0x2029):
+        valid_chars.append(c)
+
+  result = u''.join(valid_chars)
+
+  # Normalize to NFC form
+  result = unicodedata.normalize('NFC', result)
+
+  return result
+
 def js_int               (i):  return int(''.join([x for x in list(i or '0') if x.isdigit()]))  # js-like parseInt - https://gist.github.com/douglasmiranda/2174255
 
 ### Return dict value if all fields exists "" otherwise (to allow .isdigit()), avoid key errors
@@ -203,7 +241,8 @@ def Search(results, media, lang, manual, movie):
       if result:
         guid = result.group('id')
         Log.Info(u'search() - YouTube ID found - regex: {}, youtube ID: "{}", matched: "{}"'.format(regex, guid, result.group(0)))
-        results.Append( MetadataSearchResult( id='youtube|{}|{}'.format(guid,os.path.basename(dir)), name=displayname, year=None, score=100, lang=lang ) )
+        safe_id = sanitize_xml_string('youtube|{}|{}'.format(guid, os.path.basename(dir)))
+        results.Append( MetadataSearchResult( id=safe_id, name=displayname, year=None, score=100, lang=lang ) )
         Log(u''.ljust(157, '='))
         return
       else: Log.Info('search() - YouTube ID not found - regex: "{}", filename_len: {}, filename_sample: "{}"'.format(regex, len(filename), filename[:100] if len(filename) > 100 else filename))  
@@ -217,7 +256,8 @@ def Search(results, media, lang, manual, movie):
       guid   = result.group('id') if result else ''
       if result or os.path.exists(os.path.join(dir, 'youtube.id')):
         Log(u'search() - filename: "{}", found season YouTube playlist id, result.group("id"): {}'.format(filename, result.group('id')))
-        results.Append( MetadataSearchResult( id='youtube|{}|{}'.format(guid,dir), name=filename, year=None, score=100, lang=lang ) )
+        safe_id = sanitize_xml_string('youtube|{}|{}'.format(guid, dir))
+        results.Append( MetadataSearchResult( id=safe_id, name=filename, year=None, score=100, lang=lang ) )
         Log(u''.ljust(157, '='))
         return
       else:  Log('search() - id not found')
@@ -234,7 +274,8 @@ def Search(results, media, lang, manual, movie):
     else:
       video_id = Dict(json_video_details, 'id')
       Log('search() - Loaded json_video_details: {}'.format(video_id))
-      results.Append( MetadataSearchResult( id='youtube|{}|{}'.format(video_id, os.path.basename(dir)), name=displayname, year=Datetime.ParseDate(Dict(json_video_details, 'upload_date')).year, score=100, lang=lang ) )
+      safe_id = sanitize_xml_string('youtube|{}|{}'.format(video_id, os.path.basename(dir)))
+      results.Append( MetadataSearchResult( id=safe_id, name=displayname, year=Datetime.ParseDate(Dict(json_video_details, 'upload_date')).year, score=100, lang=lang ) )
       Log(u''.ljust(157, '='))
       return
   
@@ -245,7 +286,8 @@ def Search(results, media, lang, manual, movie):
       Log.Info(u'filename: "{}", channelTitle: "{}"'.format(filename, Dict(json_video_details, 'items', 0, 'snippet', 'channelTitle')))
       if filename == Dict(json_video_details, 'items', 0, 'snippet', 'channelTitle'):
         Log.Info(u'filename: "{}", found exact matching YouTube title: "{}", description: "{}"'.format(filename, Dict(json_video_details, 'items', 0, 'snippet', 'channelTitle'), Dict(json_video_details, 'items', 0, 'snippet', 'description')))
-        results.Append( MetadataSearchResult( id='youtube|{}|{}'.format(Dict(json_video_details, 'items', 0, 'id', 'channelId'),dir), name=filename, year=None, score=100, lang=lang ) )
+        safe_id = sanitize_xml_string('youtube|{}|{}'.format(Dict(json_video_details, 'items', 0, 'id', 'channelId'), dir))
+        results.Append( MetadataSearchResult( id=safe_id, name=filename, year=None, score=100, lang=lang ) )
         Log(u''.ljust(157, '='))
         return
       else:  Log.Info(u'search() - no id in title nor matching YouTube title: "{}", closest match: "{}", description: "{}"'.format(filename, Dict(json_video_details, 'items', 0, 'snippet', 'channelTitle'), Dict(json_video_details, 'items', 0, 'snippet', 'description')))
@@ -254,12 +296,17 @@ def Search(results, media, lang, manual, movie):
 
   library, root, path = GetLibraryRootPath(dir)
   Log(u'Putting folder name "{}" as guid since no assign channel id or playlist id was assigned'.format(path.split(os.sep)[-1]))
-  results.Append( MetadataSearchResult( id='youtube|{}|{}'.format(path.split(os.sep)[-2] if os.sep in path else '', dir), name=os.path.basename(filename), year=None, score=80, lang=lang ) )
+  safe_id = sanitize_xml_string('youtube|{}|{}'.format(path.split(os.sep)[-2] if os.sep in path else '', dir))
+  results.Append( MetadataSearchResult( id=safe_id, name=os.path.basename(filename), year=None, score=80, lang=lang ) )
   Log(''.ljust(157, '='))
 
 ### Download metadata using unique ID ###
 def Update(metadata, media, lang, force, movie):
   Log(u'=== update(lang={}, force={}, movie={}) ==='.format(lang, force, movie))
+
+  # Sanitize metadata.id to prevent XML serialization errors
+  if hasattr(metadata, 'id'):
+    metadata.id = sanitize_xml_string(metadata.id)
   temp1, guid, series_folder = metadata.id.split("|")
   dir                        = sanitize_path(GetMediaDir(media, movie))
   channel_id                 = guid if guid.startswith('UC') or guid.startswith('HC') else ''
