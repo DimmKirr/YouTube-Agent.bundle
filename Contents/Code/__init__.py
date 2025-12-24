@@ -186,8 +186,8 @@ def Search(results, media, lang, manual, movie):
   displayname = sanitize_path(os.path.basename((media.name if movie else media.show) or "") )
   filename    = media.items[0].parts[0].file if movie else media.filename or media.show
   dir         = GetMediaDir(media, movie)
-  Log.Info(u'[DEBUG] Raw filename from Plex: type={}, len={}, sample: "{}"'.format(
-    type(filename).__name__, len(filename) if filename else 0, filename[:100] if filename and len(filename) > 100 else filename))
+  Log.Info(u'[DEBUG] Raw filename from Plex: len={}, sample: "{}"'.format(
+    len(filename) if filename else 0, filename[:100] if filename and len(filename) > 100 else filename))
   try:                    filename = urllib.unquote(filename)  # URL decode first
   except Exception as e:  Log('search() - Exception1: filename: "{}", e: "{}"'.format(filename, e))
   try:                    filename = os.path.basename(filename)
