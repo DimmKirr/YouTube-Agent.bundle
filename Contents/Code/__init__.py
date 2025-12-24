@@ -348,6 +348,12 @@ def Update(metadata, media, lang, force, movie):
     metadata.id = sanitize_xml_string(metadata.id)
   temp1, guid, series_folder = metadata.id.split("|")
   dir                        = sanitize_path(GetMediaDir(media, movie))
+
+  # For TV shows: if dir is a season folder, go up one level to get show folder
+  if not movie and re.search(r'Season\s+\d{4}', os.path.basename(dir), re.IGNORECASE):
+    dir = os.path.dirname(dir)
+    Log.Info(u'[Fix] Detected season folder, using show folder: "{}"'.format(dir))
+
   channel_id                 = guid if guid.startswith('UC') or guid.startswith('HC') else ''
   channel_title              = ""
   json_playlist_details      = {}
