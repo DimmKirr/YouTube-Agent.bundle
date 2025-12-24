@@ -2,3 +2,4 @@
 __pycache__
 /Contents/Tests/data/**
 !/Content/Tests/data
+*.pyc
