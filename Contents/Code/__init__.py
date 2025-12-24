@@ -14,19 +14,32 @@ import hashlib
 ###Mini Functions ###
 def natural_sort_key     (s):  return [int(text) if text.isdigit() else text for text in re.split(re.compile('([0-9]+)'), str(s).lower())]  ### Avoid 1, 10, 2, 20... #Usage: list.sort(key=natural_sort_key), sorted(list, key=natural_sort_key)
 def sanitize_path        (p):
-  """Ensure path is unicode. In Python 2, decode bytes to unicode with UTF-8."""
+  """Ensure path is unicode and strip control characters. In Python 2, decode bytes to unicode with UTF-8."""
+  # First convert to unicode
   if isinstance(p, unicode):
-    return p
-  # If it's a byte string, decode it
-  if isinstance(p, str):
+    result = p
+  elif isinstance(p, str):
     try:
-      return p.decode('utf-8')  # Try UTF-8 first
+      result = p.decode('utf-8')  # Try UTF-8 first
     except UnicodeDecodeError:
       try:
-        return p.decode(sys.getfilesystemencoding())  # Fall back to system encoding
+        result = p.decode(sys.getfilesystemencoding())  # Fall back to system encoding
       except:
-        return p.decode('utf-8', errors='replace')  # Last resort
-  return unicode(p) if p is not None else u''
+        result = p.decode('utf-8', errors='replace')  # Last resort
+  else:
+    result = unicode(p) if p is not None else u''
+
+  # Strip control characters (0x00-0x1F and 0x7F-0x9F) including newlines, NULL bytes
+  # This prevents XML serialization errors in Plex
+  cleaned = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', result)
+
+  # Log if control characters were removed
+  if cleaned != result:
+    stripped_count = len(result) - len(cleaned)
+    Log.Info(u'[sanitize_path] Stripped {} control char(s): before_len={}, after_len={}, sample: "{}"'.format(
+      stripped_count, len(result), len(cleaned), cleaned[:80] if len(cleaned) > 80 else cleaned))
+
+  return cleaned
 def js_int               (i):  return int(''.join([x for x in list(i or '0') if x.isdigit()]))  # js-like parseInt - https://gist.github.com/douglasmiranda/2174255
 
 ### Return dict value if all fields exists "" otherwise (to allow .isdigit()), avoid key errors
@@ -88,7 +101,7 @@ def GetMediaDir (media, movie, file=False):
   else:
     for s in media.seasons if media else []: # TV_Show:
       for e in media.seasons[s].episodes:
-        Log.Info(media.seasons[s].episodes[e].items[0].parts[0].file)
+        Log.Info(sanitize_path(media.seasons[s].episodes[e].items[0].parts[0].file))
         return media.seasons[s].episodes[e].items[0].parts[0].file if file else os.path.dirname(media.seasons[s].episodes[e].items[0].parts[0].file)
 
 ### Get media root folder ###
@@ -173,11 +186,13 @@ def Search(results, media, lang, manual, movie):
   displayname = sanitize_path(os.path.basename((media.name if movie else media.show) or "") )
   filename    = media.items[0].parts[0].file if movie else media.filename or media.show
   dir         = GetMediaDir(media, movie)
-  try:                    filename = sanitize_path(filename)
+  Log.Info(u'[DEBUG] Raw filename from Plex: type={}, len={}, sample: "{}"'.format(
+    type(filename).__name__, len(filename) if filename else 0, filename[:100] if filename and len(filename) > 100 else filename))
+  try:                    filename = urllib.unquote(filename)  # URL decode first
   except Exception as e:  Log('search() - Exception1: filename: "{}", e: "{}"'.format(filename, e))
   try:                    filename = os.path.basename(filename)
   except Exception as e:  Log('search() - Exception2: filename: "{}", e: "{}"'.format(filename, e))
-  try:                    filename = urllib.unquote(filename)
+  try:                    filename = sanitize_path(filename)  # Then sanitize (strips control chars)
   except Exception as e:  Log('search() - Exception3: filename: "{}", e: "{}"'.format(filename, e))
   Log(u''.ljust(157, '='))
   Log(u"Search() - dir: {}, filename: {}, displayname: {}".format(dir, filename, displayname))
@@ -187,11 +202,11 @@ def Search(results, media, lang, manual, movie):
       result = url.search(filename)
       if result:
         guid = result.group('id')
-        Log.Info(u'search() - YouTube ID found - regex: {}, youtube ID: "{}"'.format(regex, guid))
+        Log.Info(u'search() - YouTube ID found - regex: {}, youtube ID: "{}", matched: "{}"'.format(regex, guid, result.group(0)))
         results.Append( MetadataSearchResult( id='youtube|{}|{}'.format(guid,os.path.basename(dir)), name=displayname, year=None, score=100, lang=lang ) )
         Log(u''.ljust(157, '='))
         return
-      else: Log.Info('search() - YouTube ID not found - regex: "{}"'.format(regex))  
+      else: Log.Info('search() - YouTube ID not found - regex: "{}", filename_len: {}, filename_sample: "{}"'.format(regex, len(filename), filename[:100] if len(filename) > 100 else filename))  
   except Exception as e:  Log('search() - filename: "{}" Regex failed to find YouTube id, error: "{}"'.format(filename, e))
   
   if movie:  Log.Info(filename)
@@ -532,7 +547,7 @@ def Update(metadata, media, lang, force, movie):
       Log.Info(u"Season: {:>2}".format(s))
     
       for e in sorted(media.seasons[s].episodes, key=natural_sort_key):
-        filename  = os.path.basename(media.seasons[s].episodes[e].items[0].parts[0].file)
+        filename  = sanitize_path(os.path.basename(media.seasons[s].episodes[e].items[0].parts[0].file))
         episode   = metadata.seasons[s].episodes[e]
         episodes += 1
         Log.Info('metadata.seasons[{:>2}].episodes[{:>3}] "{}"'.format(s, e, filename))
