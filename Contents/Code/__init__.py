@@ -12,8 +12,27 @@ from   io      import open  # open
 import hashlib
 import unicodedata          # For XML string sanitization
 
+# Python 2/3 compatibility - bytes type
+try:
+  bytes
+except NameError:
+  # Python 2: bytes is not defined, use str instead
+  bytes = str
+
 ###Mini Functions ###
 def natural_sort_key     (s):  return [int(text) if text.isdigit() else text for text in re.split(re.compile('([0-9]+)'), str(s).lower())]  ### Avoid 1, 10, 2, 20... #Usage: list.sort(key=natural_sort_key), sorted(list, key=natural_sort_key)
+
+def encode_path_for_os(p):
+  """Encode unicode path to UTF-8 bytes for Python 2 os.path operations.
+  Python 2's os.path.exists(), os.walk(), etc. don't handle unicode paths well on Linux.
+  They try to encode using ASCII which fails for non-ASCII characters.
+  This helper encodes unicode paths to UTF-8 bytes for filesystem operations."""
+  if p is None:
+    return None
+  if isinstance(p, unicode):
+    return p.encode('utf-8')
+  return p
+
 def sanitize_path        (p):
   """Ensure path is unicode and strip control characters. In Python 2, decode bytes to unicode with UTF-8."""
   # First convert to unicode with encoding detection
@@ -71,6 +90,41 @@ def sanitize_path        (p):
 
   return cleaned
 
+def sanitize_description(text):
+  """Sanitize text descriptions while preserving newlines. Used for summaries and descriptions."""
+  if text is None:
+    return u''
+
+  # First apply sanitize_path to get unicode and handle encoding
+  # But we'll need to restore newlines after
+  original_newlines = text.count('\n') if isinstance(text, unicode) else 0
+
+  # Convert to unicode if needed
+  if isinstance(text, unicode):
+    result = text
+  elif isinstance(text, str):
+    try:
+      result = text.decode('utf-8')
+    except:
+      try:
+        result = text.decode('latin-1')
+      except:
+        result = unicode(text, errors='replace')
+  else:
+    result = unicode(text) if text is not None else u''
+
+  # Normalize Unicode
+  try:
+    result = unicodedata.normalize('NFC', result)
+  except:
+    pass
+
+  # Strip control characters EXCEPT newlines (0x0A) and carriage returns (0x0D)
+  # Remove: 0x00-0x09, 0x0B-0x0C, 0x0E-0x1F, 0x7F-0x9F
+  cleaned = re.sub(r'[\x00-\x09\x0b-\x0c\x0e-\x1f\x7f-\x9f]', '', result)
+
+  return cleaned
+
 def sanitize_xml_string(s):
   """Sanitize string for use in XML attributes. Removes invalid XML characters and normalizes Unicode."""
   if s is None:
@@ -81,11 +135,17 @@ def sanitize_xml_string(s):
     s = unicode(s)
 
   # Ensure unicode
-  if isinstance(s, str):
+  # In Python 2, str is bytes and needs decoding
+  # In Python 3, str is already unicode (no decode method)
+  if isinstance(s, str) and hasattr(str, 'decode'):
+    # Python 2: str has decode method
     try:
       s = s.decode('utf-8')
     except:
       s = s.decode('utf-8', errors='replace')
+  elif isinstance(s, str):
+    # Python 3: str is already unicode, no decoding needed
+    pass
 
   # Filter out invalid XML characters
   # Valid XML chars: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
@@ -107,6 +167,153 @@ def sanitize_xml_string(s):
   result = unicodedata.normalize('NFC', result)
 
   return result
+
+def is_vk_video(video_id):
+  """Detect if video ID is from VK (format: -219482354_456239560)."""
+  if not video_id:
+    return False
+  # VK format: negative_number_number (e.g., -219482354_456239560)
+  return bool(re.match(r'^-\d+_\d+$', str(video_id)))
+
+def get_vk_channel_avatar(video_url, channel_url):
+  """Scrape channel avatar and cover image from VK pages.
+
+  For channel URLs (vkvideo.ru), follows redirects to get anonymous token cookies,
+  then retries the original URL with cookies.
+
+  Args:
+    video_url: VK video URL (e.g., "https://vk.com/video-219482354_456239560")
+    channel_url: VK channel URL (e.g., "https://vkvideo.ru/@public219482354")
+
+  Returns:
+    Tuple (avatar_url, cover_url) or (avatar_url, None) or (None, None) if not found
+  """
+  # Try channel URL first (requires cookie handling)
+  if channel_url:
+    try:
+      Log.Info(u'[VK] Fetching avatar from channel page: {}'.format(channel_url))
+
+      # Build request with Chrome User-Agent
+      headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+      }
+
+      # First attempt - this will redirect to get_anonym_token and set cookies
+      try:
+        html = HTTP.Request(channel_url, headers=headers, cacheTime=0).content
+
+        # Decode bytes to string
+        if isinstance(html, bytes):
+          html = html.decode('utf-8', errors='ignore')
+
+        # Extract og:image meta tag for avatar
+        avatar_url = None
+        cover_url = None
+
+        og_image_match = re.search(r'property="og:image"\s+content="([^"]+)"', html)
+        if not og_image_match:
+          # Try reversed pattern
+          og_image_match = re.search(r'content="([^"]+)"\s+property="og:image"', html)
+
+        if og_image_match:
+          avatar_url = og_image_match.group(1)
+          # Decode HTML entities (&amp; -> &, etc.)
+          try:
+            import HTMLParser as hp
+            avatar_url = hp.HTMLParser().unescape(avatar_url)
+          except:
+            try:
+              import html as html_lib
+              avatar_url = html_lib.unescape(avatar_url)
+            except:
+              pass  # Keep original if unescape fails
+          Log.Info(u'[VK] Found channel avatar via og:image from channel page: {}'.format(avatar_url[:80]))
+
+        # Extract channel cover image from Cover__coverImg class or InfoModal__description
+        # Try multiple patterns for cover image
+        cover_url = None
+
+        # Pattern 1: Cover__coverImg with background-image
+        cover_match = re.search(r'class="Cover__coverImg[^"]*"\s+style="background-image:\s*url\(([^)]+)\)"', html)
+        if cover_match:
+          cover_url = cover_match.group(1).strip('"\'')
+          Log.Info(u'[VK] Found cover via Cover__coverImg class')
+
+        # Pattern 2: InfoModal__description or any div with background-image containing userapi
+        if not cover_url:
+          cover_match = re.search(r'class="[^"]*InfoModal[^"]*"\s+[^>]*style="[^"]*background-image:\s*url\(([^)]+)\)"', html)
+          if cover_match:
+            cover_url = cover_match.group(1).strip('"\'')
+            Log.Info(u'[VK] Found cover via InfoModal class')
+
+        # Pattern 3: Any element with large userapi.com image
+        if not cover_url:
+          cover_match = re.search(r'https://sun\d+-\d+\.userapi\.com/[^"\s]+(?:1920|1080|cover|banner)[^"\s]*\.jpg', html)
+          if cover_match:
+            cover_url = cover_match.group(0)
+            Log.Info(u'[VK] Found cover via large userapi image pattern')
+
+        # Decode HTML entities if found
+        if cover_url:
+          try:
+            import HTMLParser as hp
+            cover_url = hp.HTMLParser().unescape(cover_url)
+          except:
+            try:
+              import html as html_lib
+              cover_url = html_lib.unescape(cover_url)
+            except:
+              pass
+          Log.Info(u'[VK] Found channel cover image from channel page: {}'.format(cover_url[:80]))
+
+        if avatar_url or cover_url:
+          return (avatar_url, cover_url)
+
+      except Exception as e:
+        Log.Info(u'[VK] Channel page request failed (may need cookies): {}'.format(e))
+
+    except Exception as e:
+      Log.Info(u'[VK] Could not fetch avatar from channel page: {}'.format(e))
+
+  # Fallback: Try video URL (only provides avatar, no cover)
+  if video_url:
+    try:
+      Log.Info(u'[VK] Fetching avatar from video page: {}'.format(video_url))
+      headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+      }
+      html = HTTP.Request(video_url, headers=headers, cacheTime=CACHE_1MONTH).content
+
+      # Decode bytes to string
+      if isinstance(html, bytes):
+        html = html.decode('utf-8', errors='ignore')
+
+      # Extract og:image meta tag
+      og_image_match = re.search(r'property="og:image"\s+content="([^"]+)"', html)
+      if not og_image_match:
+        # Try reversed pattern
+        og_image_match = re.search(r'content="([^"]+)"\s+property="og:image"', html)
+
+      if og_image_match:
+        avatar_url = og_image_match.group(1)
+        # Decode HTML entities
+        try:
+          import HTMLParser as hp
+          avatar_url = hp.HTMLParser().unescape(avatar_url)
+        except:
+          try:
+            import html as html_lib
+            avatar_url = html_lib.unescape(avatar_url)
+          except:
+            pass
+        Log.Info(u'[VK] Found channel avatar via og:image from video page: {}'.format(avatar_url[:80]))
+        return (avatar_url, None)  # Video page has no cover image
+
+    except Exception as e:
+      Log.Info(u'[VK] Could not fetch avatar from video page: {}'.format(e))
+
+  Log.Info(u'[VK] No channel avatar found from any VK page')
+  return (None, None)
 
 def js_int               (i):  return int(''.join([x for x in list(i or '0') if x.isdigit()]))  # js-like parseInt - https://gist.github.com/douglasmiranda/2174255
 
@@ -236,9 +443,18 @@ def img_load(series_root_folder, filename):
 
 ### get biggest thumbnail available
 def get_thumb(json_video_details):
+  # Try VK format first (single 'thumbnail' string)
+  vk_thumb = Dict(json_video_details, 'thumbnail')
+  if vk_thumb:
+    Log.Info(u'[get_thumb] VK thumbnail found: {}'.format(vk_thumb[:80]))
+    return vk_thumb
+
+  # Try YouTube format ('thumbnails' array)
   thumbnails = Dict(json_video_details, 'thumbnails')
-  for thumbnail in reversed(thumbnails):
-    return thumbnail['url']
+  if thumbnails:
+    for thumbnail in reversed(thumbnails):
+      Log.Info(u'[get_thumb] YouTube thumbnail found: {}'.format(thumbnail['url'][:80]))
+      return thumbnail['url']
 
   Log.Error(u'get_thumb(): No thumb found')
   return None
@@ -254,14 +470,37 @@ def Search(results, media, lang, manual, movie):
   displayname = sanitize_path(os.path.basename((media.name if movie else media.show) or "") )
   filename    = media.items[0].parts[0].file if movie else media.filename or media.show
   dir         = GetMediaDir(media, movie)
+
+  # Sanitize filename early to ensure it's unicode and avoid Unicode/ASCII mixing errors
+  filename = sanitize_path(filename) if filename else u''
+  dir = sanitize_path(dir) if dir else u''
+
   Log.Info(u'[DEBUG] Raw filename from Plex: len={}, sample: "{}"'.format(
     len(filename) if filename else 0, filename[:100] if filename and len(filename) > 100 else filename))
-  try:                    filename = urllib.unquote(filename) if filename else ''  # URL decode first
-  except Exception as e:  Log('search() - Exception1: filename: "{}", e: "{}"'.format(filename, e)); filename = filename or ''
-  try:                    filename = os.path.basename(filename) if filename else ''
-  except Exception as e:  Log('search() - Exception2: filename: "{}", e: "{}"'.format(filename, e)); filename = filename or ''
-  try:                    filename = sanitize_path(filename) if filename else ''  # Then sanitize (strips control chars)
-  except Exception as e:  Log('search() - Exception3: filename: "{}", e: "{}"'.format(filename, e)); filename = filename or ''
+
+  # URL decode - filename is already unicode from sanitize_path()
+  try:
+    if filename:
+      # In Python 2, urllib.unquote expects bytes, in Python 3 it can handle str
+      try:
+        # Try Python 3 style (str input)
+        from urllib.parse import unquote
+        filename = unquote(filename)
+      except ImportError:
+        # Python 2: convert to bytes, unquote, then back to unicode
+        if isinstance(filename, unicode):
+          filename = urllib.unquote(filename.encode('utf-8')).decode('utf-8')
+        else:
+          filename = urllib.unquote(filename).decode('utf-8')
+  except Exception as e:
+    Log(u'search() - Exception1: filename: "{}", e: "{}"'.format(filename, e))
+    filename = filename or u''
+
+  try:
+    filename = os.path.basename(filename) if filename else u''
+  except Exception as e:
+    Log(u'search() - Exception2: filename: "{}", e: "{}"'.format(filename, e))
+    filename = filename or u''
 
   # Ensure we have valid values
   if not filename or not dir:
@@ -281,8 +520,8 @@ def Search(results, media, lang, manual, movie):
         results.Append( MetadataSearchResult( id=safe_id, name=displayname, year=None, score=100, lang=lang ) )
         Log(u''.ljust(157, '='))
         return
-      else: Log.Info('search() - YouTube ID not found - regex: "{}", filename_len: {}, filename_sample: "{}"'.format(regex, len(filename), filename[:100] if len(filename) > 100 else filename))  
-  except Exception as e:  Log('search() - filename: "{}" Regex failed to find YouTube id, error: "{}"'.format(filename, e))
+      else: Log.Info(u'search() - YouTube ID not found - regex: "{}", filename_len: {}, filename_sample: "{}"'.format(regex, len(filename), filename[:100] if len(filename) > 100 else filename))
+  except Exception as e:  Log(u'search() - filename: "{}" Regex failed to find YouTube id, error: "{}"'.format(filename, e))
   
   if movie:  Log.Info(filename)
   else:
@@ -290,7 +529,11 @@ def Search(results, media, lang, manual, movie):
     if s:
       result = YOUTUBE_PLAYLIST_REGEX.search(os.path.basename(os.path.dirname(dir)))
       guid   = result.group('id') if result else ''
-      if result or os.path.exists(os.path.join(dir, 'youtube.id')):
+      youtube_id_path = os.path.join(dir, 'youtube.id')
+      # Encode to UTF-8 for Python 2 os.path.exists() compatibility
+      if isinstance(youtube_id_path, unicode):
+        youtube_id_path = youtube_id_path.encode('utf-8')
+      if result or os.path.exists(youtube_id_path):
         Log(u'search() - filename: "{}", found season YouTube playlist id, result.group("id"): {}'.format(filename, result.group('id')))
         safe_id = sanitize_xml_string('youtube|{}|{}'.format(guid, dir))
         results.Append( MetadataSearchResult( id=safe_id, name=filename, year=None, score=100, lang=lang ) )
@@ -301,9 +544,9 @@ def Search(results, media, lang, manual, movie):
   ### Try loading local JSON file if present
   json_filename = os.path.join(dir, os.path.splitext(filename)[0]+ ".info.json")
   Log(u'Searching for info file: {}'.format(json_filename))
-  if os.path.exists(json_filename):
+  if os.path.exists(encode_path_for_os(json_filename)):
     try:
-      with open(json_filename, 'r', encoding='utf-8') as f:
+      with open(encode_path_for_os(json_filename), 'r', encoding='utf-8') as f:
         json_video_details = JSON.ObjectFromString(f.read())
     except Exception as e:
       Log('search() - Unable to load info.json, e: "{}"'.format(e))
@@ -362,7 +605,7 @@ def Update(metadata, media, lang, force, movie):
   json_channel_details       = {}
   json_video_details         = {}
   series_folder              = sanitize_path(series_folder)
-  if not (len(guid)>2 and guid[0:2] in ('PL', 'UU', 'FL', 'LP', 'RD')):  metadata.title = re.sub(r'\[.*\]', '', dir).strip()  #no id mode, update title so ep gets updated
+  if not (len(guid)>2 and guid[0:2] in ('PL', 'UU', 'FL', 'LP', 'RD')):  metadata.title = re.sub(r'\[.*\]', '', os.path.basename(dir)).strip()  #no id mode, update title so ep gets updated
   Log(u''.ljust(157, '='))
     
   ### Movie Library ###
@@ -472,10 +715,23 @@ def Update(metadata, media, lang, force, movie):
     metadata.studio = 'YouTube'
     if not path in ('_unknown_folder', '.'):
       #Log.Info('[ ] series root folder:        "{}"'.format(os.path.join(root, path.split(os.sep, 1)[0])))
-      series_root_folder  = os.path.join(root, path.split(os.sep, 1)[0] if os.sep in path else path) 
+      series_root_folder  = os.path.join(root, path.split(os.sep, 1)[0] if os.sep in path else path)
       Log.Info(u'[ ] series_root_folder: "{}"'.format(series_root_folder))
-      list_files      = os.listdir(series_root_folder) if os.path.exists(series_root_folder) else []
-      subfolder_count = len([file for file in list_files if os.path.isdir(os.path.join(series_root_folder, file))])
+      if os.path.exists(encode_path_for_os(series_root_folder)):
+        list_files_raw = os.listdir(encode_path_for_os(series_root_folder))
+        # Decode bytes returned by os.listdir() to unicode (Python 2)
+        list_files = []
+        for f in list_files_raw:
+          # Python 2: str is bytes, need to decode
+          # Python 3: str is already unicode
+          if isinstance(f, bytes):
+            list_files.append(f.decode('utf-8'))
+          else:
+            list_files.append(f)
+      else:
+        list_files = []
+      # Keep paths as unicode, only encode when calling os functions
+      subfolder_count = len([file for file in list_files if os.path.isdir(encode_path_for_os(os.path.join(series_root_folder, file)))])
       Log.Info(u'[ ] subfolder_count:    "{}"'.format(subfolder_count   ))
 
       ### Extract season and transparent folder to reduce complexity and use folder as serie name ###
@@ -496,7 +752,7 @@ def Update(metadata, media, lang, force, movie):
         collection = re.sub(r'\[.*\]', '', reverse_path[-1]).strip()
         Log.Info('[ ] collections:        "{}"'.format(collection))
         if collection not in metadata.collections:  metadata.collections=[collection]
-      else:  Log.Info("Grouping folder not found or single folder, root: {}, path: {}, Grouping folder: {}, subdirs: {}, reverse_path: {}".format(root, path, os.path.basename(series_root_folder), subfolder_count, reverse_path))
+      else:  Log.Info(u"Grouping folder not found or single folder, root: {}, path: {}, Grouping folder: {}, subdirs: {}, reverse_path: {}".format(root, path, os.path.basename(series_root_folder), subfolder_count, reverse_path))
 
     ### Series - Playlist ###############################################################################################################
     if len(guid)>2 and guid[0:2] in ('PL', 'UU', 'FL', 'LP', 'RD'):
@@ -540,12 +796,12 @@ def Update(metadata, media, lang, force, movie):
           metadata.title = title
         Log.Info('[ ] title:        "{}", metadata.title: "{}"'.format(title, metadata.title))
         if not Dict(json_playlist_details, 'snippet', 'description'):
-          if Dict(json_channel_details, 'snippet', 'description'):  metadata.summary = sanitize_path(Dict(json_channel_details, 'snippet', 'description'))
+          if Dict(json_channel_details, 'snippet', 'description'):  metadata.summary = sanitize_description(Dict(json_channel_details, 'snippet', 'description'))
           else:
             summary  = u'Channel with {} videos, '.format(Dict(json_channel_details, 'statistics', 'videoCount'))
             summary += u'{} subscribers, '.format(Dict(json_channel_details, 'statistics', 'subscriberCount'))
             summary += u'{} views'.format(Dict(json_channel_details, 'statistics', 'viewCount'))
-            metadata.summary = sanitize_path(summary);  Log.Info(u'[ ] summary:     "{}"'.format(summary))  #
+            metadata.summary = summary;  Log.Info(u'[ ] summary:     "{}"'.format(summary))  #
 
         if Prefs['use_crowd_sourced_titles'] == True:
           crowd_sourced_title = DeArrow(guid)
@@ -567,13 +823,13 @@ def Update(metadata, media, lang, force, movie):
                 Log.Info('[?] json_channel_details: {}'.format(json_channel_details.keys()))
                 Log.Info('[ ] title:       "{}"'.format(Dict(json_channel_details, 'snippet', 'title'      )))
                 if not Dict(json_playlist_details, 'snippet', 'description'):
-                  if Dict(json_channel_details, 'snippet', 'description'):  metadata.summary =  sanitize_path(Dict(json_channel_details, 'snippet', 'description'))
+                  if Dict(json_channel_details, 'snippet', 'description'):  metadata.summary =  sanitize_description(Dict(json_channel_details, 'snippet', 'description'))
                   #elif guid.startswith('PL'):  metadata.summary = 'No Playlist nor Channel summary'
                   else:
                     summary  = u'Channel with {} videos, '.format(Dict(json_channel_details, 'statistics', 'videoCount'     ))
                     summary += u'{} subscribers, '.format(Dict(json_channel_details, 'statistics', 'subscriberCount'))
                     summary += u'{} views'.format(Dict(json_channel_details, 'statistics', 'viewCount'      ))
-                    metadata.summary = sanitize_path(summary) #or 'No Channel summary'
+                    metadata.summary = summary #or 'No Channel summary'
                     Log.Info(u'[ ] summary:     "{}"'.format(Dict(json_channel_details, 'snippet', 'description').replace('\n', '. ')))  #
                 
                 if Dict(json_channel_details,'snippet','country') and Dict(json_channel_details,'snippet','country') not in metadata.countries:
@@ -628,9 +884,9 @@ def Update(metadata, media, lang, force, movie):
     #NOT PLAYLIST NOR CHANNEL GUID
     else:
       Log.Info('No GUID so random folder')
-      # Extract show folder from dir path (dir is like "/path/Show Name/Season 2025/")
+      # Extract show folder from dir path (after season folder fix, dir is "/path/Show Name/")
       dir_parts = dir.rstrip(os.sep).split(os.sep)
-      show_name = dir_parts[-2] if len(dir_parts) >= 2 else series_folder
+      show_name = dir_parts[-1] if len(dir_parts) >= 1 else series_folder
       metadata.title = show_name
       Log.Info(u'Extracted show title from path: "{}"'.format(show_name))
  
@@ -654,7 +910,12 @@ def Update(metadata, media, lang, force, movie):
           videoId = Dict(video, 'id', 'videoId') or Dict(video, 'snippet', 'resourceId', 'videoId')
           if videoId and videoId in filename:
             episode.title                   = sanitize_path(Dict(video, 'snippet', 'title'       ));                                                                  Log.Info(u'[ ] title:        {}'.format(Dict(video, 'snippet', 'title'       )))
-            episode.summary                 = sanitize_path(Dict(video, 'snippet', 'description' ));                                                                  Log.Info(u'[ ] description:  {}'.format(Dict(video, 'snippet', 'description' ).replace('\n', '. ')))
+            # Add video URL to episode summary with newlines preserved
+            # Playlist/channel videos are always YouTube
+            video_url = u'https://www.youtube.com/watch?v={}'.format(videoId)
+            video_desc = sanitize_description(Dict(video, 'snippet', 'description'))
+            episode.summary = u'Video URL: {}\n\n{}'.format(video_url, video_desc)
+            Log.Info(u'[ ] description:  {}'.format(Dict(video, 'snippet', 'description' ).replace('\n', '. ')))
             episode.originally_available_at = Datetime.ParseDate(Dict(video, 'contentDetails', 'videoPublishedAt') or Dict(video, 'snippet', 'publishedAt')).date();  Log.Info('[ ] publishedAt:  {}'.format(Dict(video, 'contentDetails', 'videoPublishedAt' )))
             thumb                           = Dict(video, 'snippet', 'thumbnails', 'maxres', 'url') or Dict(video, 'snippet', 'thumbnails', 'medium', 'url')or Dict(video, 'snippet', 'thumbnails', 'standard', 'url') or Dict(video, 'snippet', 'thumbnails', 'high', 'url') or Dict(video, 'snippet', 'thumbnails', 'default', 'url')
             if thumb and thumb not in episode.thumbs:  episode.thumbs[thumb] = Proxy.Media(HTTP.Request(thumb).content, sort_order=1);                                Log.Info('[ ] thumbnail:    {}'.format(thumb))
@@ -667,31 +928,128 @@ def Update(metadata, media, lang, force, movie):
           json_filename = filename.rsplit('.', 1)[0] + ".info.json"
           Log.Info(u'populate_episode_metadata_from_info_json() - series_root_folder: {}, filename: {}'.format(series_root_folder, filename))
           Log.Info(u'Searching for "{}". Searching in "{}".'.format(json_filename, series_root_folder))
-          for root, dirnames, filenames in os.walk(series_root_folder):
+          for root, dirnames, filenames in os.walk(encode_path_for_os(series_root_folder)):
+            # Decode root if it's bytes (Python 2 returns bytes when given bytes)
+            if isinstance(root, bytes):
+              root = root.decode('utf-8')
             Log.Info(u'Directory {} contains {} files'.format(root, len(filenames)))  #for filename in filenames: Log.Info('File: {}'.format(filename))
-            if json_filename in filenames :
-              json_file = os.path.join(root, json_filename)
+
+            # Normalize all filenames to NFC to match our normalized json_filename
+            # Keep mapping from normalized to original for file access
+            normalized_to_original = {}
+            for fn in filenames:
+              # Convert to unicode if it's bytes (Python 2 with byte paths)
+              if isinstance(fn, bytes):
+                fn_unicode = fn.decode('utf-8')
+              else:
+                # Python 3: already str (unicode), or Python 2 with unicode paths
+                fn_unicode = fn
+              # Normalize to NFC and keep original for file access
+              normalized_to_original[unicodedata.normalize('NFC', fn_unicode)] = fn
+
+            if json_filename in normalized_to_original :
+              # Use the original filename from filesystem for file access
+              original_json_filename = normalized_to_original[json_filename]
+              # Build path - original_json_filename might be bytes (Python 2) or str (Python 3)
+              # Convert to unicode for joining with root (which is already unicode)
+              if isinstance(original_json_filename, bytes):
+                original_json_filename_unicode = original_json_filename.decode('utf-8')
+              else:
+                original_json_filename_unicode = original_json_filename
+
+              json_file = os.path.join(root, original_json_filename_unicode)
               try:
-                with open(json_file, 'r', encoding='utf-8') as f:
+                # Encode path for filesystem operations (Python 2 compatibility)
+                with open(encode_path_for_os(json_file), 'r', encoding='utf-8') as f:
                   json_video_details = JSON.ObjectFromString(f.read())
               except: json_video_details = None
               if json_video_details:
                 Log.Info('Attempting to read metadata from {}'.format(os.path.join(root, json_filename)))
                 videoId = Dict(json_video_details, 'id')
                 Log.Info('# videoId [{}] not in Playlist/channel item list so loading json_video_details'.format(videoId))
-                Log.Info('[?] link:     "https://www.youtube.com/watch?v={}"'.format(videoId))
+
+                # Detect VK video and extract channel metadata
+                if is_vk_video(videoId):
+                  Log.Info('[VK] VK video detected: {}'.format(videoId))
+                  uploader = Dict(json_video_details, 'uploader')
+                  uploader_id = Dict(json_video_details, 'uploader_id')
+                  webpage_url = Dict(json_video_details, 'webpage_url')
+
+                  # Build VK channel URL
+                  if uploader_id:
+                    group_id = uploader_id.replace('-', '')
+                    channel_url = u'https://vkvideo.ru/@public{}'.format(group_id)
+                    Log.Info('[VK] Channel URL: {}'.format(channel_url))
+
+                    # Add channel info to show metadata (only once)
+                    if not metadata.summary and uploader:
+                      # Get channel avatar and cover from VK pages (tries channel first, falls back to video)
+                      avatar_url, cover_url = get_vk_channel_avatar(webpage_url, channel_url)
+
+                      # Add channel poster (avatar)
+                      if avatar_url:
+                        Log.Info('[VK] Channel avatar found (full URL): {}'.format(avatar_url))
+                        if avatar_url not in metadata.posters:
+                          try:
+                            metadata.posters[avatar_url] = Proxy.Media(HTTP.Request(avatar_url).content, sort_order=1)
+                            Log.Info('[VK] Added channel poster from og:image')
+                          except Exception as e:
+                            Log.Error('[VK] Failed to fetch avatar: {}'.format(e))
+                      else:
+                        # Fallback: Use video thumbnail as channel poster
+                        vk_thumb = Dict(json_video_details, 'thumbnail')
+                        if vk_thumb:
+                          Log.Info('[VK] Using video thumbnail as channel poster (fallback): {}'.format(vk_thumb[:80]))
+                          if vk_thumb not in metadata.posters:
+                            try:
+                              metadata.posters[vk_thumb] = Proxy.Media(HTTP.Request(vk_thumb).content, sort_order=1)
+                              Log.Info('[VK] Added channel poster from video thumbnail (fallback)')
+                            except Exception as e:
+                              Log.Error('[VK] Failed to fetch video thumbnail: {}'.format(e))
+
+                      # Add channel cover/banner as background art
+                      if cover_url:
+                        Log.Info('[VK] Channel cover found: {}'.format(cover_url[:80]))
+                        if cover_url not in metadata.art:
+                          try:
+                            metadata.art[cover_url] = Proxy.Media(HTTP.Request(cover_url).content, sort_order=1)
+                            Log.Info('[VK] Added channel cover as background art')
+                          except Exception as e:
+                            Log.Error('[VK] Failed to fetch cover: {}'.format(e))
+
+                      # Set channel description with URL
+                      channel_desc = u'VK Channel: {}\nChannel URL: {}'.format(uploader, channel_url)
+                      metadata.summary = channel_desc
+                      Log.Info('[VK] Set channel summary: {}'.format(uploader))
+
+                  Log.Info('[?] link:     "{}"'.format(webpage_url or videoId))
+                else:
+                  Log.Info('[?] link:     "https://www.youtube.com/watch?v={}"'.format(videoId))
                 thumb, picture = img_load(series_root_folder, filename)  #Load locally
-                if thumb is None:
+                if not thumb:  # Check for None or empty string
                   thumb = get_thumb(json_video_details)
-                  if thumb not in episode.thumbs: picture = HTTP.Request(thumb).content  
+                  if thumb and thumb not in episode.thumbs:
+                    picture = HTTP.Request(thumb).content
                 if thumb and thumb not in episode.thumbs:
                   Log.Info(u'[ ] thumbs:   "{}"'.format(thumb))
                   episode.thumbs[thumb] = Proxy.Media(picture, sort_order=1)
                   episode.thumbs.validate_keys([thumb])
                   
                 episode.title                   = sanitize_path(Dict(json_video_details, 'title'));            Log.Info(u'[ ] title:    "{}"'.format(Dict(json_video_details, 'title')))
-                episode.summary                 = sanitize_path(Dict(json_video_details, 'description'));      Log.Info(u'[ ] summary:  "{}"'.format(Dict(json_video_details, 'description').replace('\n', '. ')))
-                if len(e)>3: episode.originally_available_at = Datetime.ParseDate(Dict(json_video_details, 'upload_date')).date();  Log.Info(u'[ ] date:     "{}"'.format(Dict(json_video_details, 'upload_date')))
+                # Add video URL and preserve newlines
+                video_id = Dict(json_video_details, 'id')
+                # Use webpage_url from .info.json if available, otherwise construct URL
+                video_url = Dict(json_video_details, 'webpage_url')
+                if not video_url:
+                  # Fallback: construct URL based on video type
+                  if is_vk_video(video_id):
+                    video_url = u'https://vk.com/video{}'.format(video_id)
+                  else:
+                    video_url = u'https://www.youtube.com/watch?v={}'.format(video_id)
+                video_desc = sanitize_description(Dict(json_video_details, 'description'))
+                episode.summary = u'Video URL: {}\n\n{}'.format(video_url, video_desc)
+                Log.Info(u'[ ] summary:  "{}"'.format(Dict(json_video_details, 'description').replace('\n', '. ')))
+                if len(str(e))>3: episode.originally_available_at = Datetime.ParseDate(Dict(json_video_details, 'upload_date')).date();  Log.Info(u'[ ] date:     "{}"'.format(Dict(json_video_details, 'upload_date')))
                 episode.duration                = int(Dict(json_video_details, 'duration'));                           Log.Info(u'[ ] duration: "{}"'.format(episode.duration))
                 if Dict(json_video_details, 'likeCount') and int(Dict(json_video_details, 'like_count')) > 0 and Dict(json_video_details, 'dislike_count') and int(Dict(json_video_details, 'dislike_count')) > 0:
                   episode.rating                = float(10*int(Dict(json_video_details, 'like_count'))/(int(Dict(json_video_details, 'dislike_count'))+int(Dict(json_video_details, 'like_count'))));  Log('[ ] rating:   "{}"'.format(episode.rating))
@@ -718,10 +1076,81 @@ def Update(metadata, media, lang, force, movie):
               except Exception as e:  Log('Error: "{}"'.format(e))
               else:
                 Log.Info('[?] link:     "https://www.youtube.com/watch?v={}"'.format(videoId))
+
+                # Fetch channel metadata from the video's channelId
+                channel_id = Dict(json_video_details, 'snippet', 'channelId')
+                if channel_id and not metadata.summary:
+                  try:
+                    json_channel_details = json_load(YOUTUBE_CHANNEL_DETAILS, channel_id)['items'][0]
+                    Log.Info('[?] Fetched channel metadata for channelId: {}'.format(channel_id))
+
+                    # Set channel description as show summary with URL at the top
+                    if Dict(json_channel_details, 'snippet', 'description'):
+                      channel_url = u'https://www.youtube.com/channel/{}'.format(channel_id)
+                      channel_desc = sanitize_description(Dict(json_channel_details, 'snippet', 'description'))
+                      metadata.summary = u'Channel URL: {}\n\n{}'.format(channel_url, channel_desc)
+                      Log.Info('[X] Channel Description: "{}"'.format(Dict(json_channel_details, 'snippet', 'description')[:200]))
+
+                    # Set channel images
+                    thumb_channel = Dict(json_channel_details, 'snippet', 'thumbnails', 'medium', 'url') or Dict(json_channel_details, 'snippet', 'thumbnails', 'high', 'url') or Dict(json_channel_details, 'snippet', 'thumbnails', 'default', 'url')
+                    if thumb_channel and thumb_channel not in metadata.posters:
+                      Log.Info(u'[X] Channel Poster: {}'.format(thumb_channel))
+                      metadata.posters[thumb_channel] = Proxy.Media(HTTP.Request(thumb_channel).content, sort_order=1)
+
+                    # Set channel banner
+                    banner = Dict(json_channel_details, 'brandingSettings', 'image', 'bannerExternalUrl')
+                    if banner:
+                      banner_url = '{}=s1920'.format(banner)
+                      if banner_url not in metadata.art:
+                        Log.Info(u'[X] Channel Banner: {}'.format(banner_url))
+                        metadata.art[banner_url] = Proxy.Media(HTTP.Request(banner_url).content, sort_order=1)
+                      if banner_url not in metadata.banners:
+                        metadata.banners[banner_url] = Proxy.Media(HTTP.Request(banner_url).content, sort_order=1)
+
+                    # Set country
+                    if Dict(json_channel_details, 'snippet', 'country'):
+                      metadata.countries.add(Dict(json_channel_details, 'snippet', 'country'))
+                      Log.Info('[X] Channel Country: {}'.format(Dict(json_channel_details, 'snippet', 'country')))
+
+                    # Set subscriber count as rating (formatted as millions)
+                    subscriber_count = Dict(json_channel_details, 'statistics', 'subscriberCount')
+                    if subscriber_count:
+                      try:
+                        subs = int(subscriber_count)
+                        # Format as millions with 2 decimal places
+                        metadata.rating = float(subs) / 1000000.0
+                        # Store formatted string in content_rating for display
+                        if subs >= 1000000:
+                          metadata.content_rating = u'{:.2f}M'.format(subs / 1000000.0)
+                        elif subs >= 1000:
+                          metadata.content_rating = u'{:.1f}K'.format(subs / 1000.0)
+                        else:
+                          metadata.content_rating = unicode(subs)
+                        Log.Info('[X] Channel Subscribers: {} (rating: {}, content_rating: {})'.format(
+                          subscriber_count, metadata.rating, metadata.content_rating))
+                      except:
+                        pass
+
+                    # Log all available channel metadata
+                    Log.Info('[?] Channel Title: {}'.format(Dict(json_channel_details, 'snippet', 'title')))
+                    Log.Info('[?] Channel Stats: {} videos, {} subscribers, {} views'.format(
+                      Dict(json_channel_details, 'statistics', 'videoCount'),
+                      Dict(json_channel_details, 'statistics', 'subscriberCount'),
+                      Dict(json_channel_details, 'statistics', 'viewCount')
+                    ))
+                  except Exception as e:
+                    Log('Could not fetch channel metadata: {}'.format(e))
+
                 thumb                           = Dict(json_video_details, 'snippet', 'thumbnails', 'maxres', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'medium', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'standard', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'high', 'url') or Dict(json_video_details, 'snippet', 'thumbnails', 'default', 'url')
                 episode.title                   = sanitize_path(json_video_details['snippet']['title']);                                 Log.Info('[ ] title:    "{}"'.format(json_video_details['snippet']['title']))
-                episode.summary                 = sanitize_path(json_video_details['snippet']['description']);                           Log.Info('[ ] summary:  "{}"'.format(json_video_details['snippet']['description'].replace('\n', '. ')))
-                if len(e)>3:  episode.originally_available_at = Datetime.ParseDate(json_video_details['snippet']['publishedAt']).date();                       Log.Info('[ ] date:     "{}"'.format(json_video_details['snippet']['publishedAt']))
+
+                # Add video URL to top of episode summary and preserve newlines
+                # YouTube API always returns YouTube videos
+                video_url = u'https://www.youtube.com/watch?v={}'.format(videoId)
+                video_desc = sanitize_description(json_video_details['snippet']['description'])
+                episode.summary = u'Video URL: {}\n\n{}'.format(video_url, video_desc)
+                Log.Info('[ ] summary:  "{}"'.format(json_video_details['snippet']['description'].replace('\n', '. ')))
+                if len(str(e))>3:  episode.originally_available_at = Datetime.ParseDate(json_video_details['snippet']['publishedAt']).date();                       Log.Info('[ ] date:     "{}"'.format(json_video_details['snippet']['publishedAt']))
                 episode.duration                = ISO8601DurationToSeconds(json_video_details['contentDetails']['duration'])*1000;               Log.Info('[ ] duration: "{}"->"{}"'.format(json_video_details['contentDetails']['duration'], episode.duration))
                 if Dict(json_video_details, 'statistics', 'likeCount') and int(json_video_details['statistics']['likeCount']) > 0 and Dict(json_video_details, 'statistics', 'dislikeCount') and int(Dict(json_video_details, 'statistics', 'dislikeCount')) > 0:
                   episode.rating                = 10*float(json_video_details['statistics']['likeCount'])/(float(json_video_details['statistics']['dislikeCount'])+float(json_video_details['statistics']['likeCount']));  Log('[ ] rating:   "{}"'.format(episode.rating))
