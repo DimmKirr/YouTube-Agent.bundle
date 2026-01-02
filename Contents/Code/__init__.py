@@ -459,6 +459,62 @@ def get_thumb(json_video_details):
   Log.Error(u'get_thumb(): No thumb found')
   return None
 
+def add_actors_from_info_json(metadata, json_video_details):
+  """Add actors/roles from .info.json when channel API is unavailable.
+
+  Extracts creator/uploader information from local .info.json files and creates
+  Role objects with name and role title. This enables non-YouTube sources
+  (Small Bets, Vimeo, VK, etc.) to display instructor/actor metadata in Plex.
+
+  Args:
+    metadata: Plex metadata object (show or episode level)
+    json_video_details: Parsed .info.json dictionary
+  """
+  # Skip if roles already populated from channel API
+  if hasattr(metadata, 'roles') and len(metadata.roles) > 0:
+    Log.Info(u'[add_actors_from_info_json] Skipping - roles already populated ({} roles)'.format(len(metadata.roles)))
+    return
+
+  # Try creator first, then uploader, then channel
+  actor_name = Dict(json_video_details, 'creator') or Dict(json_video_details, 'uploader') or Dict(json_video_details, 'channel')
+
+  if actor_name:
+    actor_name = sanitize_path(actor_name)
+
+    # Determine role title based on content type or default to 'Instructor'
+    # Check for common patterns in categories/tags
+    categories = Dict(json_video_details, 'categories') or []
+    tags = Dict(json_video_details, 'tags') or []
+    all_tags = [t.lower() for t in categories + tags] if categories or tags else []
+
+    # Determine appropriate role title
+    if any(t in all_tags for t in ['education', 'tutorial', 'course', 'howto', 'how-to']):
+      role_title = 'Instructor'
+    elif any(t in all_tags for t in ['podcast', 'interview', 'talk show']):
+      role_title = 'Host'
+    elif any(t in all_tags for t in ['music', 'concert', 'performance']):
+      role_title = 'Artist'
+    elif any(t in all_tags for t in ['vlog', 'blog', 'personal']):
+      role_title = 'Creator'
+    else:
+      role_title = 'Instructor'  # Default for educational content
+
+    # Create the role
+    role = metadata.roles.new()
+    role.name = actor_name
+    role.role = role_title
+
+    # Try to get uploader thumbnail if available
+    # yt-dlp sometimes includes uploader_thumbnail in the info.json
+    uploader_thumb = Dict(json_video_details, 'uploader_thumbnail') or Dict(json_video_details, 'channel_thumbnail')
+    if uploader_thumb:
+      role.photo = uploader_thumb
+
+    Log.Info(u'[add_actors_from_info_json] Added role: name="{}", role="{}", photo={}'.format(
+      actor_name, role_title, 'yes' if uploader_thumb else 'no'))
+  else:
+    Log.Info(u'[add_actors_from_info_json] No creator/uploader/channel found in info.json')
+
 def Start():
   HTTP.CacheTime                  = CACHE_1MONTH
   HTTP.Headers['User-Agent'     ] = 'Mozilla/5.0 (iPad; CPU OS 7_0_4 like Mac OS X) AppleWebKit/537.51.1 (KHTML, like Gecko) Version/7.0 Mobile/11B554a Safari/9537.54'
@@ -664,6 +720,9 @@ def Update(metadata, media, lang, force, movie):
             meta_director.name  = director
             Log('director: '+ director)
           except:  pass
+
+        # Add actors/roles from info.json (creator/uploader fields)
+        add_actors_from_info_json(metadata, json_video_details)
         return
 
     ### Movie - API call ################################################################################################################
@@ -1060,9 +1119,12 @@ def Update(metadata, media, lang, force, movie):
 
                 for category  in Dict(json_video_details, 'categories') or []:  genre_array[category] = genre_array[category]+1 if category in genre_array else 1
                 for tag       in Dict(json_video_details, 'tags')       or []:  genre_array[tag     ] = genre_array[tag     ]+1 if tag      in genre_array else 1
-                
+
                 Log.Info(u'[ ] genres:   "{}"'.format([x for x in metadata.genres]))  #metadata.genres.clear()
                 for id in [id for id in genre_array if genre_array[id]>episodes/2 and id not in metadata.genres]:  metadata.genres.add(id)
+
+                # Add actors/roles from info.json to show metadata (for non-YouTube sources)
+                add_actors_from_info_json(metadata, json_video_details)
                 break
           
           #Loading from API

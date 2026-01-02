@@ -1021,6 +1021,332 @@ def process_video_file(agent, video_file, verbose=False):
 
 
 # ============================================================================
+# PHASE 5: Unit Tests for Actor/Role Extraction
+# ============================================================================
+
+import tempfile
+import shutil
+
+class ActorRoleTestResult:
+    """Store test results for actor/role extraction tests."""
+    def __init__(self, test_name, passed, message='', details=None):
+        self.test_name = test_name
+        self.passed = passed
+        self.message = message
+        self.details = details or {}
+
+def create_test_info_json(test_dir, filename, info_data):
+    """Create a test .info.json file with the given data.
+
+    Args:
+        test_dir: Directory to create the file in
+        filename: Base filename (without extension)
+        info_data: Dictionary with info.json contents
+
+    Returns:
+        Path to the created .info.json file
+    """
+    json_path = os.path.join(test_dir, filename + '.info.json')
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(info_data, f, ensure_ascii=False, indent=2)
+    return json_path
+
+def run_actor_extraction_test(agent, test_name, info_data, expected_name, expected_role):
+    """Run a single actor extraction test.
+
+    Args:
+        agent: The imported agent module
+        test_name: Name of the test case
+        info_data: Dictionary with info.json contents
+        expected_name: Expected actor name (or None if no actor expected)
+        expected_role: Expected role title (or None if no actor expected)
+
+    Returns:
+        ActorRoleTestResult with test outcome
+    """
+    # Create temporary test directory structure
+    # Structure: temp_dir/Show Name/Season 2025/video.info.json
+    temp_dir = tempfile.mkdtemp(prefix='yt_agent_test_')
+
+    try:
+        show_dir = os.path.join(temp_dir, 'Test Show')
+        season_dir = os.path.join(show_dir, 'Season 2025')
+        os.makedirs(season_dir)
+
+        # Create test .info.json file
+        video_filename = 'test_video_{}'.format(info_data.get('id', 'test123'))
+        json_path = create_test_info_json(season_dir, video_filename, info_data)
+
+        # Create mock media object
+        mp4_path = json_path.replace('.info.json', '.mp4')
+        media = MockMedia(os.path.basename(mp4_path), 'Test Show', file_path=mp4_path)
+
+        # Run Search to get ID
+        results = MockResults()
+        try:
+            agent.Search(results, media, 'en', False, False)
+        except Exception as e:
+            return ActorRoleTestResult(
+                test_name, False,
+                'Search() failed: {}'.format(e)
+            )
+
+        if len(results) == 0:
+            return ActorRoleTestResult(
+                test_name, False,
+                'Search() returned no results'
+            )
+
+        # Run Update to populate metadata
+        metadata = MockMetadata(results.results[0].id)
+        try:
+            agent.Update(metadata, media, 'en', True, False)
+        except Exception as e:
+            return ActorRoleTestResult(
+                test_name, False,
+                'Update() failed: {}'.format(e)
+            )
+
+        # Check actor/role extraction
+        if expected_name is None:
+            # Expect no roles
+            if len(metadata.roles) == 0:
+                return ActorRoleTestResult(
+                    test_name, True,
+                    'Correctly created no roles',
+                    {'roles_count': 0}
+                )
+            else:
+                return ActorRoleTestResult(
+                    test_name, False,
+                    'Expected no roles but found {}'.format(len(metadata.roles)),
+                    {'roles_count': len(metadata.roles)}
+                )
+        else:
+            # Expect specific actor/role
+            if len(metadata.roles) == 0:
+                return ActorRoleTestResult(
+                    test_name, False,
+                    'Expected actor "{}" but no roles were created'.format(expected_name),
+                    {'roles_count': 0}
+                )
+
+            # Check first role
+            role = metadata.roles[0]
+            actual_name = role.name if hasattr(role, 'name') else None
+            actual_role = role.role if hasattr(role, 'role') else None
+
+            if actual_name == expected_name and actual_role == expected_role:
+                return ActorRoleTestResult(
+                    test_name, True,
+                    'Actor "{}" with role "{}" correctly extracted'.format(actual_name, actual_role),
+                    {'name': actual_name, 'role': actual_role}
+                )
+            else:
+                return ActorRoleTestResult(
+                    test_name, False,
+                    'Expected name="{}", role="{}" but got name="{}", role="{}"'.format(
+                        expected_name, expected_role, actual_name, actual_role
+                    ),
+                    {'expected_name': expected_name, 'expected_role': expected_role,
+                     'actual_name': actual_name, 'actual_role': actual_role}
+                )
+
+    finally:
+        # Clean up temp directory
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
+
+def run_actor_role_unit_tests(agent):
+    """Run all actor/role extraction unit tests.
+
+    Args:
+        agent: The imported agent module
+
+    Returns:
+        Tuple of (passed_count, failed_count, results_list)
+    """
+    print_header("UNIT TESTS: Actor/Role Extraction")
+
+    test_cases = [
+        # Test 1: Basic creator field
+        {
+            'name': 'Basic creator field',
+            'info': {
+                'id': 'test_creator_001',
+                'title': 'Test Video with Creator',
+                'description': 'Test description',
+                'creator': 'Jane Doe',
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': 'Jane Doe',
+            'expected_role': 'Instructor'
+        },
+        # Test 2: Uploader fallback (no creator)
+        {
+            'name': 'Uploader fallback (no creator)',
+            'info': {
+                'id': 'test_uploader_002',
+                'title': 'Test Video with Uploader Only',
+                'description': 'Test description',
+                'uploader': 'John Smith',
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': 'John Smith',
+            'expected_role': 'Instructor'
+        },
+        # Test 3: Creator takes priority over uploader
+        {
+            'name': 'Creator takes priority over uploader',
+            'info': {
+                'id': 'test_priority_003',
+                'title': 'Test Video with Both Fields',
+                'description': 'Test description',
+                'creator': 'Creator Name',
+                'uploader': 'Uploader Name',
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': 'Creator Name',
+            'expected_role': 'Instructor'
+        },
+        # Test 4: Channel fallback (no creator or uploader)
+        {
+            'name': 'Channel fallback (no creator or uploader)',
+            'info': {
+                'id': 'test_channel_004',
+                'title': 'Test Video with Channel Only',
+                'description': 'Test description',
+                'channel': 'Channel Name',
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': 'Channel Name',
+            'expected_role': 'Instructor'
+        },
+        # Test 5: Education category -> Instructor role
+        {
+            'name': 'Education category sets Instructor role',
+            'info': {
+                'id': 'test_education_005',
+                'title': 'Educational Video',
+                'description': 'Test description',
+                'uploader': 'Professor Smith',
+                'categories': ['Education', 'Tutorial'],
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': 'Professor Smith',
+            'expected_role': 'Instructor'
+        },
+        # Test 6: Podcast category -> Host role
+        {
+            'name': 'Podcast category sets Host role',
+            'info': {
+                'id': 'test_podcast_006',
+                'title': 'Podcast Episode',
+                'description': 'Test description',
+                'uploader': 'Podcast Host',
+                'categories': ['Podcast'],
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': 'Podcast Host',
+            'expected_role': 'Host'
+        },
+        # Test 7: Music category -> Artist role
+        {
+            'name': 'Music category sets Artist role',
+            'info': {
+                'id': 'test_music_007',
+                'title': 'Music Video',
+                'description': 'Test description',
+                'uploader': 'Band Name',
+                'categories': ['Music'],
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': 'Band Name',
+            'expected_role': 'Artist'
+        },
+        # Test 8: No actor fields -> no roles created
+        {
+            'name': 'No actor fields creates no roles',
+            'info': {
+                'id': 'test_noactor_008',
+                'title': 'Video Without Actor Info',
+                'description': 'Test description',
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': None,
+            'expected_role': None
+        },
+        # Test 9: Unicode actor name
+        {
+            'name': 'Unicode actor name handling',
+            'info': {
+                'id': 'test_unicode_009',
+                'title': 'Video with Unicode Creator',
+                'description': 'Test description',
+                'creator': u'Müller François 日本語',
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': u'Müller François 日本語',
+            'expected_role': 'Instructor'
+        },
+        # Test 10: Vlog category -> Creator role
+        {
+            'name': 'Vlog category sets Creator role',
+            'info': {
+                'id': 'test_vlog_010',
+                'title': 'My Vlog',
+                'description': 'Test description',
+                'uploader': 'Vlogger',
+                'tags': ['vlog', 'personal'],
+                'upload_date': '20240101',
+                'duration': 300
+            },
+            'expected_name': 'Vlogger',
+            'expected_role': 'Creator'
+        },
+    ]
+
+    results = []
+    passed = 0
+    failed = 0
+
+    for test_case in test_cases:
+        print("\n--- Test: {} ---".format(test_case['name']))
+        result = run_actor_extraction_test(
+            agent,
+            test_case['name'],
+            test_case['info'],
+            test_case['expected_name'],
+            test_case['expected_role']
+        )
+        results.append(result)
+
+        if result.passed:
+            print_success(result.message)
+            passed += 1
+        else:
+            print_error(result.message)
+            failed += 1
+
+    # Print summary
+    print("\n" + "-" * 40)
+    print("Actor/Role Unit Tests: {} passed, {} failed".format(passed, failed))
+
+    return passed, failed, results
+
+
+# ============================================================================
 # Main Test Runner
 # ============================================================================
 
@@ -1041,15 +1367,19 @@ API Key:
         """
     )
 
-    parser.add_argument('data_dir', help='Directory containing test data (.info.json files)')
+    parser.add_argument('data_dir', nargs='?', default=None, help='Directory containing test data (.info.json files)')
     parser.add_argument('--api-key', help='YouTube API key for real API queries (overrides youtube-key.txt)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output with full tracebacks')
+    parser.add_argument('--unit-tests', '-u', action='store_true', help='Run unit tests for actor/role extraction')
 
     args = parser.parse_args()
 
-    # Validate inputs
-    if not os.path.isdir(args.data_dir):
-        print_error("Data directory not found: {}".format(args.data_dir))
+    # Validate inputs - data_dir required unless running unit tests only
+    if not args.unit_tests and (args.data_dir is None or not os.path.isdir(args.data_dir)):
+        if args.data_dir is None:
+            print_error("data_dir required unless using --unit-tests")
+        else:
+            print_error("Data directory not found: {}".format(args.data_dir))
         return 1
 
     # Get paths
@@ -1062,7 +1392,10 @@ API Key:
     print_colored("=" * 80, Colors.BOLD)
     print()
     print("Agent: {}".format(agent_file))
-    print("Data:  {}".format(os.path.abspath(args.data_dir)))
+    if args.data_dir:
+        print("Data:  {}".format(os.path.abspath(args.data_dir)))
+    if args.unit_tests:
+        print("Mode:  Unit Tests ")
     print()
 
     # Phase 1: Validate Plex compatibility
@@ -1092,6 +1425,20 @@ API Key:
     if not agent:
         print_error("\nFailed to import agent!")
         return 1
+
+    # Run unit tests if requested
+    if args.unit_tests:
+        unit_passed, unit_failed, unit_results = run_actor_role_unit_tests(agent)
+
+        # If only unit tests requested (no data_dir), exit here
+        if args.data_dir is None:
+            print()
+            if unit_failed > 0:
+                print_error("Unit tests completed with {} failure(s)".format(unit_failed))
+                return 1
+            else:
+                print_success("All {} unit tests passed!".format(unit_passed))
+                return 0
 
     # Phase 4: Find and process files
     print_header("PHASE 4: Processing Test Files")
