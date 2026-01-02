@@ -1,1 +1,5 @@
-/youtube-key.txt
+youtube-key.txt
+__pycache__
+/Contents/Tests/data/**
+!/Content/Tests/data
+*.pyc
